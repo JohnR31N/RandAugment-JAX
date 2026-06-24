@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "randaug-jax"
+version = "0.1.0"
+description = "JAX and PyTorch/XLA TPU framework with torchvision RandAugment input pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+tpu = [
+    "jax[tpu]>=0.4.30",
+    "flax>=0.8.0",
+    "optax>=0.2.0",
+]
+torch-xla = [
+    "torch_xla[tpu]>=2.2",
+]
+cpu = [
+    "jax[cpu]>=0.4.30",
+    "flax>=0.8.0",
+    "optax>=0.2.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+randaug-jax-train = "randaug_jax.train:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

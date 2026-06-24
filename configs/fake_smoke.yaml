@@ -1,0 +1,35 @@
+experiment_name: fake_smoke
+
+runtime:
+  backend: jax
+
+dataset:
+  name: fake
+  data_dir: ./data
+  image_size: 32
+  num_classes: 10
+  num_workers: 0
+  fake_train_size: 256
+  fake_eval_size: 128
+
+augment:
+  policy: randaugment
+  randaug_num_ops: 2
+  randaug_magnitude: 9
+
+model:
+  name: cifar_resnet
+  depth: 20
+  width: 8
+
+train:
+  seed: 0
+  global_batch_size: 32
+  epochs: 1
+  learning_rate: 0.05
+  warmup_epochs: 0
+  mixed_precision: false
+  log_every_steps: 1
+  eval_every_epochs: 1
+  checkpoint_every_epochs: 0
+  ckpt_dir: ./checkpoints/fake_smoke

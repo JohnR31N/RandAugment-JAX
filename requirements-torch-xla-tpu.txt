@@ -1,0 +1,7 @@
+--find-links https://storage.googleapis.com/libtpu-releases/libtpu_releases.html
+torch>=2.2
+torchvision>=0.17
+torch_xla[tpu]>=2.2
+numpy>=1.24
+PyYAML>=6.0
+tqdm>=4.66

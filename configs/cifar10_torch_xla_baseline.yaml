@@ -1,0 +1,38 @@
+experiment_name: cifar10_torch_xla_baseline
+
+runtime:
+  backend: torch_xla
+  torch_xla_spawn_processes: null
+
+dataset:
+  name: cifar10
+  data_dir: ./data
+  image_size: 32
+  num_workers: 8
+  pin_memory: false
+  download: true
+
+augment:
+  policy: baseline
+  random_crop_padding: 4
+  horizontal_flip: true
+
+model:
+  name: cifar_resnet
+  depth: 20
+  width: 16
+  dropout_rate: 0.0
+
+train:
+  seed: 0
+  global_batch_size: 1024
+  epochs: 200
+  learning_rate: 0.4
+  warmup_epochs: 5
+  weight_decay: 0.0005
+  label_smoothing: 0.0
+  mixed_precision: true
+  log_every_steps: 50
+  eval_every_epochs: 1
+  checkpoint_every_epochs: 10
+  ckpt_dir: ./checkpoints/cifar10_torch_xla_baseline
