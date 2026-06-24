@@ -50,6 +50,9 @@ python -m pip install -e .
 ```
 
 Keep the `torch` and `torch_xla` minor versions matched if you pin versions.
+If editable install fails on an older TPU image, run
+`python -m pip install --upgrade --user pip setuptools wheel` first, or use
+`PYTHONPATH=$PWD/src python -m randaug_jax.train ...` as a direct fallback.
 
 For local CPU smoke checks, install the CPU extra instead:
 
