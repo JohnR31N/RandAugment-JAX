@@ -13,9 +13,13 @@ from .config import ExperimentConfig
 class DataLoaders:
     train: Any
     eval: Any
+    test: Any
     train_sampler: Optional[Any]
+    eval_sampler: Optional[Any]
+    test_sampler: Optional[Any]
     local_batch_size: int
     steps_per_epoch: int
+    eval_name: str
 
 
 def make_data_loaders(
@@ -34,11 +38,11 @@ def make_data_loaders(
         )
 
     local_batch_size = config.train.global_batch_size // process_count
-    train_dataset = _make_dataset(config, train=True)
-    eval_dataset = _make_dataset(config, train=False)
+    train_dataset, eval_dataset, test_dataset, eval_name = _make_datasets(config)
 
     train_sampler = None
     eval_sampler = None
+    test_sampler = None
     train_shuffle = True
     if process_count > 1:
         train_sampler = DistributedSampler(
@@ -50,6 +54,13 @@ def make_data_loaders(
         )
         eval_sampler = DistributedSampler(
             eval_dataset,
+            num_replicas=process_count,
+            rank=process_index,
+            shuffle=False,
+            drop_last=False,
+        )
+        test_sampler = DistributedSampler(
+            test_dataset,
             num_replicas=process_count,
             rank=process_index,
             shuffle=False,
@@ -77,12 +88,30 @@ def make_data_loaders(
         drop_last=False,
         persistent_workers=config.dataset.num_workers > 0,
     )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=local_batch_size,
+        shuffle=False,
+        sampler=test_sampler,
+        num_workers=config.dataset.num_workers,
+        pin_memory=config.dataset.pin_memory,
+        drop_last=False,
+        persistent_workers=config.dataset.num_workers > 0,
+    )
+    steps_per_epoch = len(train_loader)
+    if config.train.max_train_steps > 0:
+        steps_per_epoch = min(steps_per_epoch, config.train.max_train_steps)
+
     return DataLoaders(
         train=train_loader,
         eval=eval_loader,
+        test=test_loader,
         train_sampler=train_sampler,
+        eval_sampler=eval_sampler,
+        test_sampler=test_sampler,
         local_batch_size=local_batch_size,
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=steps_per_epoch,
+        eval_name=eval_name,
     )
 
 
@@ -128,10 +157,14 @@ def shard_batch(batch: dict[str, np.ndarray], local_device_count: int) -> dict[s
     return {key: _shard(value) for key, value in batch.items()}
 
 
-def _make_dataset(config: ExperimentConfig, *, train: bool):
+def _make_dataset(config: ExperimentConfig, *, train: bool, augment: bool | None = None):
     from torchvision import datasets
 
-    transform = build_torchvision_transform(config.dataset, config.augment, train=train)
+    transform = build_torchvision_transform(
+        config.dataset,
+        config.augment,
+        train=train if augment is None else augment,
+    )
     root = config.dataset.data_dir
     name = config.dataset.name
 
@@ -159,3 +192,31 @@ def _make_dataset(config: ExperimentConfig, *, train: bool):
         )
 
     raise ValueError("dataset.name must be one of: cifar10, cifar100, fake")
+
+
+def _make_datasets(config: ExperimentConfig):
+    if config.dataset.name == "fake":
+        train_dataset = _make_dataset(config, train=True)
+        test_dataset = _make_dataset(config, train=False)
+        return train_dataset, test_dataset, test_dataset, "test"
+
+    train_aug_dataset = _make_dataset(config, train=True, augment=True)
+    train_eval_dataset = _make_dataset(config, train=True, augment=False)
+    test_dataset = _make_dataset(config, train=False, augment=False)
+
+    if config.dataset.validation_split <= 0:
+        return train_aug_dataset, test_dataset, test_dataset, "test"
+
+    from torch.utils.data import Subset
+
+    rng = np.random.default_rng(config.train.seed)
+    indices = rng.permutation(len(train_aug_dataset))
+    validation_size = int(round(len(indices) * config.dataset.validation_split))
+    validation_indices = sorted(indices[:validation_size].tolist())
+    train_indices = sorted(indices[validation_size:].tolist())
+
+    train_dataset = Subset(train_aug_dataset, train_indices)
+    validation_dataset = Subset(train_eval_dataset, validation_indices)
+    eval_dataset = test_dataset if config.train.eval_on_test_each_epoch else validation_dataset
+    eval_name = "test" if config.train.eval_on_test_each_epoch else "validation"
+    return train_dataset, eval_dataset, test_dataset, eval_name

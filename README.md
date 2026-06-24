@@ -19,6 +19,10 @@ You can choose the training backend from config:
 - `configs/cifar10_randaugment.yaml`: JAX + RandAugment.
 - `configs/cifar10_torch_xla_baseline.yaml`: PyTorch/XLA baseline.
 - `configs/cifar10_torch_xla_randaugment.yaml`: PyTorch/XLA + RandAugment.
+- `configs/cifar10_preact_resnet18_baseline.yaml`: flat-schema PreActResNet-18
+  baseline matching the comparison config.
+- `configs/cifar10_preact_resnet18_randaugment.yaml`: the same config with
+  `method: randaugment`.
 - `configs/fake_smoke.yaml`: tiny synthetic-data config for syntax/runtime smoke
   checks.
 - `src/randaug_jax/data.py`: PyTorch/torchvision input pipeline.
@@ -86,6 +90,13 @@ PyTorch/XLA RandAugment competitor:
 python -m randaug_jax.train --config configs/cifar10_torch_xla_randaugment.yaml
 ```
 
+PreActResNet-18 comparison config:
+
+```bash
+python -m randaug_jax.train --config configs/cifar10_preact_resnet18_baseline.yaml
+python -m randaug_jax.train --config configs/cifar10_preact_resnet18_randaugment.yaml
+```
+
 JAX multi-host TPU jobs should initialize JAX distributed:
 
 ```bash
@@ -112,6 +123,10 @@ python -m randaug_jax.train \
 
 - `augment.policy` supports `none`, `baseline`, and `randaugment`.
 - `runtime.backend` supports `jax` and `torch_xla`.
+- The flat comparison schema is also supported. In that format, `method` maps
+  to `augment.policy`, `batch_size` maps to global batch size, and
+  `validation_split/final_test/save_csv/save_best_only` are honored by the
+  PyTorch/XLA runner.
 - The torchvision RandAugment knobs are `randaug_num_ops`,
   `randaug_magnitude`, and `randaug_num_magnitude_bins`.
 - In `jax` mode, PyTorch is used only for CPU-side data loading and

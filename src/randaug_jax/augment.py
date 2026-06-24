@@ -19,7 +19,7 @@ def build_torchvision_transform(
     if dataset.image_size != 32:
         ops.append(transforms.Resize(dataset.image_size, interpolation=InterpolationMode.BILINEAR))
 
-    if train and augment.policy != "none":
+    if train and augment.policy != "none" and augment.basic_aug:
         if augment.random_crop_padding > 0:
             ops.append(
                 transforms.RandomCrop(

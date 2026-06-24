@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -37,6 +38,7 @@ def _train_worker(index: int, config: ExperimentConfig) -> None:
     if ordinal == 0:
         print(json.dumps(config_to_dict(config), indent=2, sort_keys=True))
         print(f"torch_xla device={device} ordinal={ordinal} world_size={world_size}")
+    csv_logger = CsvLogger(config) if ordinal == 0 and config.train.save_csv else None
 
     loaders = make_data_loaders(
         config,
@@ -60,6 +62,8 @@ def _train_worker(index: int, config: ExperimentConfig) -> None:
     start_epoch = 1
     if config.train.resume:
         start_epoch = _restore_checkpoint(config, model, optimizer, scheduler, device)
+    best_eval_accuracy = -1.0
+    best_checkpoint_path = _checkpoint_dir(config) / "best.pt"
 
     for epoch in range(start_epoch, config.train.epochs + 1):
         if loaders.train_sampler is not None:
@@ -79,26 +83,54 @@ def _train_worker(index: int, config: ExperimentConfig) -> None:
         )
         if ordinal == 0:
             elapsed = time.time() - epoch_start
+            lr = optimizer.param_groups[0]["lr"]
             print(
                 f"epoch={epoch:03d} train_loss={train_metrics['loss']:.4f} "
                 f"train_acc={train_metrics['accuracy']:.4f} elapsed={elapsed:.1f}s"
             )
+            if csv_logger is not None:
+                csv_logger.write(epoch, "train", train_metrics, lr, elapsed)
 
+        eval_metrics = None
         if epoch % config.train.eval_every_epochs == 0:
             eval_loader = pl.MpDeviceLoader(loaders.eval, device)
-            eval_metrics = _evaluate(model, criterion, eval_loader)
+            eval_metrics = _evaluate(config, model, criterion, eval_loader)
             if ordinal == 0:
+                lr = optimizer.param_groups[0]["lr"]
                 print(
-                    f"epoch={epoch:03d} eval_loss={eval_metrics['loss']:.4f} "
-                    f"eval_acc={eval_metrics['accuracy']:.4f}"
+                    f"epoch={epoch:03d} {loaders.eval_name}_loss={eval_metrics['loss']:.4f} "
+                    f"{loaders.eval_name}_acc={eval_metrics['accuracy']:.4f}"
                 )
+                if csv_logger is not None:
+                    csv_logger.write(epoch, loaders.eval_name, eval_metrics, lr, 0.0)
 
-        should_checkpoint = (
-            config.train.checkpoint_every_epochs > 0
-            and epoch % config.train.checkpoint_every_epochs == 0
-        )
-        if should_checkpoint:
-            _save_checkpoint(config, epoch, model, optimizer, scheduler)
+        if config.train.save_checkpoint:
+            if config.train.save_best_only:
+                if eval_metrics is not None and eval_metrics["accuracy"] > best_eval_accuracy:
+                    best_eval_accuracy = eval_metrics["accuracy"]
+                    _save_checkpoint(config, epoch, model, optimizer, scheduler, path=best_checkpoint_path)
+                    xm.rendezvous("best_checkpoint_saved")
+            else:
+                should_checkpoint = (
+                    config.train.checkpoint_every_epochs > 0
+                    and epoch % config.train.checkpoint_every_epochs == 0
+                )
+                if should_checkpoint:
+                    _save_checkpoint(config, epoch, model, optimizer, scheduler)
+
+    if config.train.final_test:
+        if config.train.save_checkpoint and config.train.save_best_only and best_checkpoint_path.exists():
+            _load_checkpoint(best_checkpoint_path, model, optimizer, scheduler, device)
+        test_loader = pl.MpDeviceLoader(loaders.test, device)
+        test_metrics = _evaluate(config, model, criterion, test_loader)
+        if ordinal == 0:
+            lr = optimizer.param_groups[0]["lr"]
+            print(
+                f"final_test_loss={test_metrics['loss']:.4f} "
+                f"final_test_acc={test_metrics['accuracy']:.4f}"
+            )
+            if csv_logger is not None:
+                csv_logger.write(config.train.epochs, "test", test_metrics, lr, 0.0)
 
 
 def _train_one_epoch(
@@ -117,6 +149,8 @@ def _train_one_epoch(
     model.train()
     totals = torch.zeros(3, device=xm.xla_device())
     for step, (images, labels) in enumerate(train_loader, start=1):
+        if config.train.max_train_steps > 0 and step > config.train.max_train_steps:
+            break
         optimizer.zero_grad(set_to_none=True)
         logits = model(images)
         loss = criterion(logits, labels)
@@ -149,14 +183,16 @@ def _train_one_epoch(
     return _metrics_from_tensor(reduced)
 
 
-def _evaluate(model, criterion, eval_loader) -> dict[str, float]:
+def _evaluate(config: ExperimentConfig, model, criterion, eval_loader) -> dict[str, float]:
     import torch
     import torch_xla.core.xla_model as xm
 
     model.eval()
     totals = torch.zeros(3, device=xm.xla_device())
     with torch.no_grad():
-        for images, labels in eval_loader:
+        for step, (images, labels) in enumerate(eval_loader, start=1):
+            if config.train.max_eval_steps > 0 and step > config.train.max_eval_steps:
+                break
             logits = model(images)
             loss = criterion(logits, labels)
             correct = (logits.argmax(dim=1) == labels).sum().float()
@@ -177,6 +213,13 @@ def _make_lr_lambda(config: ExperimentConfig, steps_per_epoch: int):
     end_scale = config.train.end_learning_rate / config.train.learning_rate
 
     def lr_lambda(step: int) -> float:
+        if config.train.lr_schedule == "constant":
+            return 1.0
+        if config.train.lr_schedule == "step":
+            epoch = step / max(steps_per_epoch, 1)
+            drops = sum(epoch >= milestone for milestone in config.train.lr_decay_epochs)
+            scale = config.train.lr_decay_rate**drops
+            return max(scale, end_scale)
         if warmup_steps > 0 and step < warmup_steps:
             return max(float(step + 1) / float(warmup_steps), 1.0e-8)
         progress_steps = max(total_steps - warmup_steps, 1)
@@ -196,32 +239,36 @@ def _metrics_from_tensor(tensor) -> dict[str, float]:
 
 
 def _restore_checkpoint(config: ExperimentConfig, model, optimizer, scheduler, device) -> int:
-    import torch
-    import torch_xla.core.xla_model as xm
-
-    ckpt_path = _latest_checkpoint(Path(config.train.ckpt_dir))
+    ckpt_path = Path(config.train.resume_checkpoint) if config.train.resume_checkpoint else _latest_checkpoint(_checkpoint_dir(config))
     if ckpt_path is None:
         if _xla_ordinal() == 0:
-            print(f"No checkpoint found in {config.train.ckpt_dir}; starting from epoch 1")
+            print(f"No checkpoint found in {_checkpoint_dir(config)}; starting from epoch 1")
         return 1
 
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
-    model.load_state_dict(checkpoint["model"])
-    model.to(device)
-    optimizer.load_state_dict(checkpoint["optimizer"])
-    scheduler.load_state_dict(checkpoint["scheduler"])
+    checkpoint = _load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
     start_epoch = int(checkpoint["epoch"]) + 1
     if _xla_ordinal() == 0:
         print(f"Restored {ckpt_path}; starting from epoch {start_epoch}")
     return start_epoch
 
 
-def _save_checkpoint(config: ExperimentConfig, epoch: int, model, optimizer, scheduler) -> None:
+def _load_checkpoint(ckpt_path: Path, model, optimizer, scheduler, device):
+    import torch
+
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    model.load_state_dict(checkpoint["model"])
+    model.to(device)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    return checkpoint
+
+
+def _save_checkpoint(config: ExperimentConfig, epoch: int, model, optimizer, scheduler, path: Path | None = None) -> None:
     import torch_xla.core.xla_model as xm
 
-    ckpt_dir = Path(config.train.ckpt_dir)
+    ckpt_dir = _checkpoint_dir(config)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"epoch_{epoch:05d}.pt"
+    ckpt_path = path or ckpt_dir / f"epoch_{epoch:05d}.pt"
     xm.save(
         {
             "epoch": epoch,
@@ -232,7 +279,7 @@ def _save_checkpoint(config: ExperimentConfig, epoch: int, model, optimizer, sch
         },
         str(ckpt_path),
     )
-    if _xla_ordinal() == 0:
+    if _xla_ordinal() == 0 and path is None:
         _prune_checkpoints(ckpt_dir, config.train.keep_checkpoints)
 
 
@@ -247,6 +294,42 @@ def _prune_checkpoints(ckpt_dir: Path, keep: int) -> None:
     checkpoints = sorted(ckpt_dir.glob("epoch_*.pt"))
     for ckpt_path in checkpoints[:-keep]:
         ckpt_path.unlink(missing_ok=True)
+
+
+def _checkpoint_dir(config: ExperimentConfig) -> Path:
+    if config.train.ckpt_dir:
+        return Path(config.train.ckpt_dir)
+    return Path(config.train.checkpoint_dir) / config.train.run_name
+
+
+class CsvLogger:
+    def __init__(self, config: ExperimentConfig) -> None:
+        output_dir = Path(config.train.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        name = config.train.output_name or config.train.run_name or config.experiment_name
+        if not name.endswith(".csv"):
+            name = f"{name}.csv"
+        self.path = output_dir / name
+        self.file = self.path.open("w", newline="", encoding="utf-8")
+        self.writer = csv.DictWriter(
+            self.file,
+            fieldnames=["epoch", "split", "loss", "accuracy", "learning_rate", "elapsed_seconds"],
+        )
+        self.writer.writeheader()
+        self.file.flush()
+
+    def write(self, epoch: int, split: str, metrics: dict[str, float], learning_rate: float, elapsed: float) -> None:
+        self.writer.writerow(
+            {
+                "epoch": epoch,
+                "split": split,
+                "loss": metrics["loss"],
+                "accuracy": metrics["accuracy"],
+                "learning_rate": learning_rate,
+                "elapsed_seconds": elapsed,
+            }
+        )
+        self.file.flush()
 
 
 def _xla_world_size() -> int:
