@@ -163,6 +163,8 @@ def _override_alias(key: str) -> str:
         "max_train_steps": "train.max_train_steps",
         "max_eval_steps": "train.max_eval_steps",
         "validation_split": "dataset.validation_split",
+        "num_workers": "dataset.num_workers",
+        "pin_memory": "dataset.pin_memory",
         "eval_on_test_each_epoch": "train.eval_on_test_each_epoch",
         "final_test": "train.final_test",
         "learning_rate": "train.learning_rate",
@@ -209,6 +211,8 @@ def _normalize_config_data(data: Mapping[str, Any]) -> dict[str, Any]:
             "name": data.get("dataset", "cifar10"),
             "data_dir": data.get("data_dir", "./data"),
             "validation_split": data.get("validation_split", 0.0),
+            "num_workers": data.get("num_workers", 0),
+            "pin_memory": data.get("pin_memory", False),
         },
         "augment": {
             "policy": method,
