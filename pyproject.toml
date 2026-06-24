@@ -11,8 +11,8 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "PyYAML>=6.0",
-    "torch>=2.2",
-    "torchvision>=0.17",
+    "torch>=2.9",
+    "torchvision>=0.24",
     "tqdm>=4.66",
 ]
 
@@ -23,7 +23,7 @@ tpu = [
     "optax>=0.2.0",
 ]
 torch-xla = [
-    "torch_xla[tpu]>=2.2",
+    "torch_xla[tpu]>=2.9",
 ]
 cpu = [
     "jax[cpu]>=0.4.30",
